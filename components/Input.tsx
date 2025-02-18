@@ -37,7 +37,6 @@ const Input: React.FC<InputProps> = ({
                     focus:ring-0
                     peer
                 "
-
                 placeholder=" "
             />
             <label
