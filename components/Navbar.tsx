@@ -46,7 +46,7 @@ const Navbar = () => {
                 <div
                     className="
                         flex-row
-                        mll-8
+                        ml-8
                         gap-7
                         hidden
                         lg:flex
