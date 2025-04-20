@@ -4,6 +4,7 @@ import subprocess
 from fastapi import APIRouter, UploadFile, Form
 from fastapi.responses import JSONResponse
 from pymongo import MongoClient
+from concurrent.futures import ThreadPoolExecutor
 import boto3
 from dotenv import load_dotenv
 
@@ -17,8 +18,8 @@ collection = db["Movie"]
 
 s3 = boto3.client("s3")
 BUCKET = os.getenv("S3_BUCKET_NAME")
+PART_SIZE = 8 * 1024 * 1024  # 8MB chunks for better throughput
 
-PART_SIZE = 5 * 1024 * 1024  # 5MB
 
 def get_video_duration(file_path: str) -> str:
     try:
@@ -34,6 +35,7 @@ def get_video_duration(file_path: str) -> str:
         print("ffprobe error:", e)
         return "Unknown"
 
+
 def generate_thumbnail(video_path: str, thumbnail_path: str):
     try:
         subprocess.run([
@@ -45,6 +47,18 @@ def generate_thumbnail(video_path: str, thumbnail_path: str):
         print("Thumbnail error:", e)
         return False
 
+
+def upload_part(part_number, data, upload_id, key):
+    response = s3.upload_part(
+        Bucket=BUCKET,
+        Key=key,
+        PartNumber=part_number,
+        UploadId=upload_id,
+        Body=data
+    )
+    return {"PartNumber": part_number, "ETag": response["ETag"]}
+
+
 @router.post("/upload")
 async def upload_video(
     file: UploadFile,
@@ -52,36 +66,34 @@ async def upload_video(
     description: str = Form(""),
     genre: str = Form("Action")
 ):
-    # Save uploaded file temporarily
     temp_path = f"/tmp/{uuid.uuid4()}_{file.filename}"
     with open(temp_path, "wb") as f:
         while chunk := await file.read(1024 * 1024):
             f.write(chunk)
 
-    # Multipart upload to S3
     key = f"uploads/{uuid.uuid4()}_{file.filename}"
     multipart_upload = s3.create_multipart_upload(Bucket=BUCKET, Key=key)
     upload_id = multipart_upload["UploadId"]
-    parts = []
 
     try:
-        part_number = 1
+        chunks = []
         with open(temp_path, "rb") as f:
+            part_number = 1
             while True:
                 data = f.read(PART_SIZE)
                 if not data:
                     break
-                response = s3.upload_part(
-                    Bucket=BUCKET,
-                    Key=key,
-                    PartNumber=part_number,
-                    UploadId=upload_id,
-                    Body=data
-                )
-                parts.append({"PartNumber": part_number, "ETag": response["ETag"]})
+                chunks.append((part_number, data))
                 part_number += 1
 
-        # Complete upload
+        # Parallel upload
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            futures = [
+                executor.submit(upload_part, part_num, data, upload_id, key)
+                for part_num, data in chunks
+            ]
+            parts = [future.result() for future in futures]
+
         s3.complete_multipart_upload(
             Bucket=BUCKET,
             Key=key,
@@ -94,12 +106,11 @@ async def upload_video(
         os.remove(temp_path)
         return JSONResponse(status_code=500, content={"error": str(e)})
 
-    # Duration + thumbnail
     duration = get_video_duration(temp_path)
-
     thumbnail_filename = f"thumbnails/{uuid.uuid4()}.jpg"
     thumbnail_local = f"/tmp/{uuid.uuid4()}.jpg"
     thumbnail_url = ""
+
     if generate_thumbnail(temp_path, thumbnail_local):
         s3.upload_file(thumbnail_local, BUCKET, thumbnail_filename)
         thumbnail_url = f"https://{BUCKET}.s3.amazonaws.com/{thumbnail_filename}"
@@ -107,7 +118,6 @@ async def upload_video(
 
     os.remove(temp_path)
 
-    # Save to MongoDB
     video_url = f"https://{BUCKET}.s3.amazonaws.com/{key}"
     record = {
         "title": title,

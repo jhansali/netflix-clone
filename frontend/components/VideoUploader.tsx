@@ -1,10 +1,11 @@
 import React, { useState } from "react";
 import { useSession } from "next-auth/react";
-import { uploadVideoInChunks } from "@/libs/s3Upload";
+import { useRouter } from "next/router";
 
 export default function VideoUploader() {
   const { data: session } = useSession();
   const email = session?.user?.email;
+  const router = useRouter();
 
   const [uploading, setUploading] = useState(false);
   const [progress, setProgress] = useState(0);
@@ -20,48 +21,35 @@ export default function VideoUploader() {
     if (file) setThumbnail(file);
   };
 
-  const uploadThumbnailToS3 = async (file: File): Promise<string> => {
-    const formData = new FormData();
-    formData.append("file", file);
-
-    const res = await fetch("http://localhost:8000/upload-thumbnail", {
-      method: "POST",
-      body: formData,
-    });
-
-    const data = await res.json();
-    return data.thumbnailUrl;
-  };
-
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
     setUploading(true);
+    setProgress(0);
     setMessage("");
 
     try {
-      let thumbnailUrl = "";
+      const formData = new FormData();
+      formData.append("file", file);
+      formData.append("title", title);
+      formData.append("description", description);
+      formData.append("genre", genre);
       if (thumbnail) {
-        thumbnailUrl = await uploadThumbnailToS3(thumbnail);
+        formData.append("thumbnail", thumbnail);
       }
 
-      const result = await uploadVideoInChunks(file, setProgress);
-      const videoUrl = result.location;
-
-      await fetch("http://localhost:8000/save-video", {
+      const res = await fetch("http://localhost:8000/upload", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          title,
-          description,
-          genre,
-          videoUrl,
-          thumbnailUrl
-        })
+        body: formData,
       });
 
-      setMessage("Upload and save complete!");
+      const data = await res.json();
+      setMessage("Upload successful!");
+
+      console.log("Video URL:", data.videoUrl);
+      console.log("Thumbnail URL:", data.thumbnailUrl);
+      console.log("Duration:", data.duration);
     } catch (error) {
       console.error("Upload failed:", error);
       setMessage("Upload failed. Check console for details.");
@@ -131,8 +119,27 @@ export default function VideoUploader() {
                    cursor-pointer"
         disabled={uploading}
       />
-      {uploading && <p className="mt-4">Uploading: {progress}%</p>}
+
+      {uploading && (
+        <div className="mt-4">
+          <div className="w-full bg-gray-700 rounded-full h-3 overflow-hidden">
+            <div
+              className="bg-green-500 h-3 transition-all duration-500"
+              style={{ width: `${progress}%` }}
+            ></div>
+          </div>
+          <p className="mt-1 text-sm text-gray-300">Uploading...</p>
+        </div>
+      )}
+
       {message && <p className="mt-4 text-green-400">{message}</p>}
+
+      <button
+        className="mt-6 w-full bg-blue-500 hover:bg-blue-600 text-white font-semibold py-2 px-4 rounded"
+        onClick={() => window.location.href = "/"}
+      >
+        Go to Homepage
+      </button>
     </div>
   );
 }
